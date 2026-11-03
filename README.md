@@ -1,102 +1,42 @@
-# esp32-serprog
-a minimal flashrom/serprog SPI programmer implementation for esp32 family, inspired by [pico-serprog](https://github.com/stacksmashing/pico-serprog) and [stm32-vserprog](https://github.com/dword1511/stm32-vserprog)
+# ESP32-S3 N16R8 SPI NOR 只读器
 
-## Features
+基于 [thisiseth/esp32-serprog](https://github.com/thisiseth/esp32-serprog)，
+为 TENQEI 的双 USB-C / CH343P ESP32-S3 N16R8 开发板配置。
+仅使用原生 USB Serial/JTAG 和 SPI2，读取在板 Winbond W25Q128JV（16 MiB）。
+独立项目，不依赖或修改小智语音终端。
 
-Use your ESP32 board as a [flashrom](https://flashrom.org/) compatible SPI flash programmer
+**先看 [在板读取电气安全检查](docs/ELECTRICAL_SAFETY.zh-CN.md)。未确认供电轨与 STM32 总线状态，
+不要接入 SPI 信号，不要给目标板供电，不要按 BOOT 解锁。固件不能检测这些条件。**
 
-* Should be compatible with all ESP32 family MCUs
-* Uses ESP32 HW SPI peripheral capable of up to 80 MHz clock rate
-* Multiple connection options: USB Serial/JTAG, HW UART, TCP (Wi-Fi)<sup>1</sup>
+## 功能
 
-<sup>1</sup> - flashrom serprog TCP capability is limited to non-windows OSes and requires flashrom version 1.4.0 or later 
+- 固件端默认拒绝，仅允许 9F、05、35、15、03、0B、5A 的严格长度读取事务。
+- 写使能、编程、擦除、修改状态、复位、掉电唤醒、QPI/地址模式修改均不支持。
+- GPIO10/11/12/13 上电为输入、无内部上下拉；不初始化 SPI 外设。
+- 上电后先松开 BOOT，再按住两秒完成物理解锁；主机不能替代这个动作。
+- serprog 输出使能后，只有通过白名单的读取才初始化 SPI。
+- 初始时钟 500 kHz，默认硬上限 500 kHz。提高上限必须重新配置并编译。
+- 主机正常关闭时通过 serprog 输出禁用释放 SPI；异常退出后应断开测试夹、复位开发板。
+- 不控制目标 VCC；不提供自动供电功能。
 
-## Configuration
+## 文档与脚本
 
-First you need an esp-idf (v6.0 or newer) installation. The most convenient option is probably the official VS Code esp-idf extension, pick latest stable sdk version.
+| 内容 | 入口 |
+| --- | --- |
+| 电气检查、供电、STM32 总线隔离 | [ELECTRICAL_SAFETY.zh-CN.md](docs/ELECTRICAL_SAFETY.zh-CN.md) |
+| 接线表 | [WIRING.zh-CN.md](docs/WIRING.zh-CN.md) |
+| Apple Silicon Mac 安装、编译、烧录与读取 | [MACOS.zh-CN.md](docs/MACOS.zh-CN.md) |
+| 故障排查 | [TROUBLESHOOTING.zh-CN.md](docs/TROUBLESHOOTING.zh-CN.md) |
+| 上游审计、白名单、安全边界 | [IMPLEMENTATION.zh-CN.md](docs/IMPLEMENTATION.zh-CN.md) |
+| 编译与烧录 | scripts/build_macos.sh、scripts/flash_macos.sh |
+| 两次完整读取 | scripts/read_twice.py |
+| 独立文件校验 | scripts/verify_dumps.py |
 
-1) Set your target chip using `idf.py set-target your_chip` where `your_chip` is e.g. `esp32s3`
-2) Run `idf.py menuconfig` and set `Component config -> ESP-STDIO -> Channel for console output` to the serial interface you are going to use. 
-  this will initialize the corresponding peripheral and bind **stdin** and **stdout**. Leave 'secondary output' as none.
-3) At the beginning of `main.c` check what are the predefined SPI pins for your target MCU / set your own (if configurable).
-4) Below the SPI config check and modify chosen serial interface configuration (e.g. baud rate if using HW UART).
+项目目录为 `src/serprog`；固定 ESP-IDF v6.0.x，CI 使用 v6.0。
+N16 配置为 16 MB DIO / 40 MHz，R8 PSRAM 不启用。
 
-Serial interface to use options are (MCU dependent):
+## 许可证与来源
 
-### USB Serial/JTAG
-
-This is the default option for USB-capable chips (ESP32-S3, ESP32-C3, ESP32-C6 etc.)
-
-### HW UART
-
-If USB Serial/JTAG is not supported by your MCU or works unreliably,
-HW UART can be used
-
-* available on all ESP32 family MCUs
-* a board with USB-UART converter (or an external one) is required though
-* uses default TX&RX pins and a default baud rate of 921600 
-
-### USB-CDC
-
-in theory tinyUSB can be used instead of built-in USB Serial/JTAG peripheral, 
-but it is supported only by a subset of USB Serial/JTAG-capable chips (e.g. ESP32-S3 but not ESP32-C3/C6)
-and since USB Serial/JTAG no longer misbehaves, i don't see any benefit in implementing USB-CDC
-
-### TCP over Wi-Fi
-
-*serprog TCP support is available only in non-windows builds e.g. linux, wsl2 etc.*
-
-***warning**: flashrom serprog TCP support is working reliably only on flashrom version >= 1.4.0*
-
-to enable TCP over Wi-Fi, before building run `idf.py menuconfig` and go to `esp32-serprog`,
-select `Wi-Fi enabled` and set up your (existing) Wi-Fi credentials
-
-ESP32 will connect to your Wi-Fi network and start listening for flashrom connections at (default setting) TCP port `8888`. 
-IP address to connect to can be obtained either from default console output or by resolving the hostname (default setting) `esp32-serprog` / looking at your router client table
-
-flashrom usage is the same as with UART, but instead of `dev=/dev/ttyACM0` you pass your ip:port e.g. `ip=192.168.0.2:8888`:
-
-```
-flashrom -p serprog:ip=192.168.1.120:8888,spispeed=20M -c W25Q32BV/W25Q32CV/W25Q32DV --verbose -w ../8266.bin
-```
-
-## Build and flash
-
-run `idf.py flash`
-
-## Use with flashrom
-
-**WARNING**: ESP32 family IO operates at 3.3V, **DO NOT** connect 1.8V flash chips directly, use a levelshifter in that case. 
-even the cheapest BSS138-based one will do the job although the SPI speed will be limited to ~200-400k. a proper levelshifter IC like TXS0108E should work fine at all reasonable SPI speeds
-
-*i have successfully reflashed my Steam Deck 1.8V 16MByte BIOS chip using the cheapest aliexpress MOSFET levelshifter and 1.8V LDO at spispeed=250K, although it took like 20 minutes*
-
-SPI speed selection is up to you, depends on the flash chip, wiring etc. - ESP32 should support up to 80MHz in theory. If no spispeed parameter is provided default value of 8M is used
-
-UART baud rate matters only when using HW UART, at least serial/JTAG will always transmit as fast as USB allows
-
-(linux/wsl2)
-
-identify a programmer&chip (no action)
-```
-flashrom -p serprog:dev=/dev/ttyACM0:921600,spispeed=8M
-```
-
-read to file
-```
-flashrom -p serprog:dev=/dev/ttyACM0:921600,spispeed=8M -c <chip> -r flash.bin
-```
-
-erase chip
-```
-flashrom -p serprog:dev=/dev/ttyACM0:921600,spispeed=8M -c <chip> --erase
-```
-
-write from file
-```
-flashrom -p serprog:dev=/dev/ttyACM0:921600,spispeed=8M -c <chip> -w flash.bin
-```
-
-## License
-
-since i have borrowed snippets from the [pico-serprog](https://github.com/stacksmashing/pico-serprog) by [stacksmashing](https://github.com/stacksmashing), the least common denominator is GPL 3.0
+保留上游 GPLv3 许可证全文 [COPYING](COPYING)。原始实现来自 thisiseth/esp32-serprog，
+其 README 说明复用了 stacksmashing/pico-serprog 的片段，并参考 stm32-vserprog。
+分发编译固件时同时提供对应源码与 GPLv3 许可信息。源代码审计不等于实物电气验证。
