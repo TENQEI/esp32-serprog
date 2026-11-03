@@ -1,0 +1,9 @@
+menu "Read-only SPI NOR reader"
+config READER_MAX_SPI_HZ
+    int "SPI frequency ceiling (raise only after verified 500 kHz dumps)"
+    range 500000 4000000
+    default 500000
+config ESP32_SERPROG_WIFI_DISABLED
+    bool
+    default y
+endmenu

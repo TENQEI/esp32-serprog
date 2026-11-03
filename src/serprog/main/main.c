@@ -14,34 +14,37 @@
 ////////////// Please update the following configuration according to your HardWare spec /////////////////
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-#ifdef CONFIG_IDF_TARGET_ESP32 //ESP32 can use any pins for SPI 
-                               //but 'native' IOMUX pins are believed to be more stable for higher speeds
-                               //if non-native pins are used there is no difference between HSPI and VSPI
-    //native SPI pins
+#include "driver/gpio.h"
+#include <stdatomic.h>
+#include "readonly_policy.h"
 
-    #define EEPROM_HOST  SPI3_HOST //VSPI
-    #define PIN_NUM_MISO 19
-    #define PIN_NUM_MOSI 23
-    #define PIN_NUM_CLK  18
-    #define PIN_NUM_CS   5
-
-    //or
-
-    // #define EEPROM_HOST  SPI2_HOST //HSPI 
-    // #define PIN_NUM_MISO 12
-    // #define PIN_NUM_MOSI 13
-    // #define PIN_NUM_CLK  14
-    // #define PIN_NUM_CS   15
-
-#else //on other (newer) MCUs 'native' SPI pins vs GPIO matrix routing difference is less noticeable 
-      //so just choose whatever you like
-    #define EEPROM_HOST  SPI2_HOST 
-    #define PIN_NUM_MISO 2
-    #define PIN_NUM_MOSI 41
-    #define PIN_NUM_CLK  40
-    #define PIN_NUM_CS   42
-
+#if !defined(CONFIG_IDF_TARGET_ESP32S3) || !defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG) || defined(CONFIG_ESP32_SERPROG_WIFI_ENABLED)
+#error This reader requires ESP32-S3, native USB Serial/JTAG, and Wi-Fi disabled.
 #endif
+#define EEPROM_HOST SPI2_HOST
+#define PIN_NUM_CS   10
+#define PIN_NUM_MOSI 11
+#define PIN_NUM_CLK  12
+#define PIN_NUM_MISO 13
+#define ARM_PIN GPIO_NUM_0
+
+/* The BOOT button must first be released, then held for >=2 s after boot.
+ * Only this task grants permission; USB commands cannot arm the reader. */
+static atomic_bool reader_armed;
+static void arm_task(void *arg)
+{
+    (void)arg;
+    while (!gpio_get_level(ARM_PIN)) vTaskDelay(pdMS_TO_TICKS(20));
+    unsigned held = 0;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+        held = gpio_get_level(ARM_PIN) ? 0 : held + 1;
+        if (held >= 100) {
+            atomic_store(&reader_armed, true);
+            vTaskDelete(NULL);
+        }
+    }
+}
 
 #ifdef CONFIG_ESP32_SERPROG_WIFI_ENABLED
     #include "wifi.h"
@@ -102,6 +105,7 @@ static const char TAG[] = "serprog";
   (1 << S_CMD_S_BUSTYPE) | \
   (1 << S_CMD_S_SPI_FREQ) | \
   (1 << S_CMD_Q_WRNMAXLEN) | \
+  (1 << S_CMD_S_PIN_STATE) | \
   (1 << S_CMD_Q_RDNMAXLEN) \
 )
 
@@ -153,17 +157,44 @@ DMA_ATTR unsigned char read_buffer[SPI_BUF_SIZE];
 
 uint8_t syncnop[] = { S_NAK, S_ACK };
 
-spi_device_handle_t spi_device;
+static spi_device_handle_t spi_device;
+static bool bus_initialized;
+static uint32_t requested_freq = 500000;
+
+static bool output_enabled;
+static void pins_idle(void)
+{
+    /* gpio_reset_pin() enables pull-ups on this target; do not use it here. */
+    gpio_config_t idle = {
+        .pin_bit_mask = (1ULL << PIN_NUM_CS) | (1ULL << PIN_NUM_MOSI) |
+                        (1ULL << PIN_NUM_CLK) | (1ULL << PIN_NUM_MISO),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    ESP_ERROR_CHECK(gpio_config(&idle));
+}
+static void spi_stop(void)
+{
+    if (spi_device) {
+        ESP_ERROR_CHECK(spi_bus_remove_device(spi_device));
+        spi_device = NULL;
+    }
+    if (bus_initialized) {
+        ESP_ERROR_CHECK(spi_bus_free(EEPROM_HOST));
+        bus_initialized = false;
+    }
+    pins_idle();
+}
 
 static uint32_t serprog_spi_init(uint32_t freq) 
 {
     esp_err_t ret;
 
-    if (spi_device != NULL)
-    {
-        spi_bus_remove_device(spi_device);
-    }
-    spi_bus_free(EEPROM_HOST);
+    if (!atomic_load(&reader_armed)) return 0;
+    spi_stop();
+    freq = reader_clamp_frequency(freq, CONFIG_READER_MAX_SPI_HZ);
 
     //initialize SPI host
     spi_bus_config_t buscfg = 
@@ -182,8 +213,10 @@ static uint32_t serprog_spi_init(uint32_t freq)
         goto cleanup;
     }
 
+    bus_initialized = true;
     spi_device_interface_config_t devcfg = 
     {
+        .clock_source = SPI_CLK_SRC_APB,
         .clock_speed_hz = freq,
         .mode = 0,
         .spics_io_num = PIN_NUM_CS,
@@ -207,18 +240,12 @@ static uint32_t serprog_spi_init(uint32_t freq)
         goto cleanup;
     }
 
-    ESP_ERROR_CHECK(ret);
-
+    if ((uint32_t)freq_khz * 1000 > freq) goto cleanup;
     return freq_khz * 1000;
 
     //release spi if error
 cleanup:
-    if (spi_device != NULL)
-    {
-        spi_bus_remove_device(spi_device);
-        spi_device = NULL;
-    }
-    spi_bus_free(EEPROM_HOST);
+    spi_stop();
     return 0;
 }
 
@@ -238,14 +265,14 @@ static void process(int command)
             serprog_putchar(S_ACK);
             serprog_putu32(S_CMD_MAP);
 
-            for(int i = 0; i < 32 - sizeof(uint32_t); ++i) 
+            for (size_t i = 0; i < 32 - sizeof(uint32_t); ++i) 
             {
                 serprog_putchar(0);
             }
             break;
         case S_CMD_Q_PGMNAME:
             serprog_putchar(S_ACK);
-            serprog_write("esp32-serprog\x0\x0\x0", 1, 16);
+            serprog_write("s3-nor-readonly\0", 1, 16);
             break;
         case S_CMD_Q_SERBUF:
             serprog_putchar(S_ACK);
@@ -293,17 +320,24 @@ static void process(int command)
                 uint32_t wlen = serprog_getu24();
                 uint32_t rlen = serprog_getu24();
 
-                if ((wlen + rlen) > SPI_BUF_SIZE)
-                {
+                /* Drain every declared TX byte, even a rejected oversized frame.
+                 * Otherwise payload bytes could become new serprog commands. */
+                bool fits = wlen <= SPI_BUF_SIZE / 2 && rlen <= SPI_BUF_SIZE / 2;
+                for (uint32_t i = 0; i < wlen; ++i) {
+                    int byte = serprog_getchar();
+                    if (byte == EOF) { spi_stop(); return; }
+                    if (fits) write_buffer[i] = (uint8_t)byte;
+                }
+                if (!fits || !output_enabled || !atomic_load(&reader_armed) ||
+                    !reader_read_allowed(write_buffer, wlen, rlen)) {
+                    serprog_putchar(S_NAK);
+                    break;
+                }
+                if (!spi_device && !serprog_spi_init(requested_freq)) {
                     serprog_putchar(S_NAK);
                     break;
                 }
 
-                if (serprog_read(write_buffer, 1, wlen) < wlen)
-                {
-                    break;
-                }
-                
                 memset(write_buffer + wlen, 0, SPI_BUF_SIZE - wlen);
 
                 esp_err_t err;
@@ -342,13 +376,36 @@ static void process(int command)
                 }
             }
             break;
+        case S_CMD_S_PIN_STATE: {
+            int state = serprog_getchar();
+            if (state == 0) {
+                output_enabled = false;
+                spi_stop();
+                serprog_putchar(S_ACK);
+            } else if (state == 1 && atomic_load(&reader_armed)) {
+                output_enabled = true;
+                serprog_putchar(S_ACK);
+            } else {
+                serprog_putchar(S_NAK);
+            }
+            break;
+        }
         case S_CMD_S_SPI_FREQ:
             {
                 uint32_t freq = serprog_getu32();
-                if (freq >= 1) 
+                if (reader_clamp_frequency(freq, CONFIG_READER_MAX_SPI_HZ) > 0) 
                 {
-                    serprog_putchar(S_ACK);
-                    serprog_putu32(serprog_spi_init(freq));
+                    requested_freq = reader_clamp_frequency(freq, CONFIG_READER_MAX_SPI_HZ);
+                    /* Frequency negotiation alone never enables SPI outputs. */
+                    if (spi_device) {
+                        uint32_t actual = serprog_spi_init(requested_freq);
+                        if (!actual) { serprog_putchar(S_NAK); break; }
+                        serprog_putchar(S_ACK);
+                        serprog_putu32(actual);
+                    } else {
+                        serprog_putchar(S_ACK);
+                        serprog_putu32(requested_freq);
+                    }
                 } 
                 else 
                 {
@@ -424,12 +481,23 @@ void app_main(void)
     #endif
 #endif
 
-    serprog_spi_init(8*1000*1000); //use 8M spispeed as initial value
+    pins_idle();
+    gpio_config_t arm_config = {
+        .pin_bit_mask = 1ULL << ARM_PIN,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    ESP_ERROR_CHECK(gpio_config(&arm_config));
+    if (xTaskCreate(arm_task, "physical_arm", 2048, NULL, 2, NULL) != pdPASS)
+        abort();
 
     for (;;) 
     {
         int command = serprog_getchar();
 
+        if (command == EOF) { spi_stop(); vTaskDelay(pdMS_TO_TICKS(20)); continue; }
         process(command);
     }
 }

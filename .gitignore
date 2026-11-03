@@ -44,3 +44,8 @@ tags
 
 # Dependency lock files
 dependencies.lock
+# Read-only reader output and target dumps (never publish toy audio dumps)
+src/serprog/build-reader/
+src/serprog/sdkconfig.reader*
+__pycache__/
+dumps/

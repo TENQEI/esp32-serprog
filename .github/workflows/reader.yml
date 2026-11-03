@@ -1,0 +1,37 @@
+name: Read-only reader
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cc -std=c11 -Wall -Wextra -Werror tests/test_policy.c -o /tmp/test-policy && /tmp/test-policy
+      - run: python3 tests/run_protocol_test.py
+      - run: python3 -m unittest discover -s tests -v
+      - run: bash -n scripts/build_macos.sh scripts/flash_macos.sh
+  firmware:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v6.0
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ESP32-S3 native USB reader
+        shell: bash
+        run: |
+          . /opt/esp/idf/export.sh
+          bash scripts/build_macos.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: esp32s3-n16r8-readonly-500k
+          path: |
+            src/serprog/build-reader/bootloader/bootloader.bin
+            src/serprog/build-reader/partition_table/partition-table.bin
+            src/serprog/build-reader/main.bin
+            src/serprog/build-reader/flasher_args.json
+            src/serprog/build-reader/flash_args
+            src/serprog/sdkconfig.reader
