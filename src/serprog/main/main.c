@@ -265,7 +265,7 @@ static void process(int command)
             serprog_putchar(S_ACK);
             serprog_putu32(S_CMD_MAP);
 
-            for(int i = 0; i < 32 - sizeof(uint32_t); ++i) 
+            for (size_t i = 0; i < 32 - sizeof(uint32_t); ++i) 
             {
                 serprog_putchar(0);
             }
