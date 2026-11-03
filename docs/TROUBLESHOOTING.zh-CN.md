@@ -27,6 +27,7 @@ USB 断连/主机崩溃后，不能保证立刻自动停止所有引脚输出；
 ```bash
 cc -std=c11 -Wall -Wextra -Werror tests/test_policy.c -o /tmp/test-policy
 /tmp/test-policy
+python3 tests/run_protocol_test.py
 python3 -m unittest discover -s tests -v
 bash -n scripts/build_macos.sh scripts/flash_macos.sh
 ```

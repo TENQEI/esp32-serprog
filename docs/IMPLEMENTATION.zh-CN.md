@@ -63,3 +63,11 @@ S_PIN_STATE=1 还需此标记；S_PIN_STATE=0 释放 SPI 外设、关闭输出�
 - [Winbond W25Q128JV 文档入口](https://www.winbond.com/hq/support/documentation/?__locale=en&category=%2F.categories%2Fresources%2Fdatasheet%2F&family=%2Fproduct%2Fcode-storage-flash-memory%2Fserial-nor-flash%2Findex.html&line=%2Fproduct%2Fcode-storage-flash-memory%2Findex.html&pno=W25Q128JV)
 - [flashrom serprog 实现](https://github.com/flashrom/flashrom/blob/main/programmers/serprog.c)
 - [flashrom Winbond 型号映射](https://github.com/flashrom/flashrom/blob/main/flashchips/winbond.c)
+
+## 自动化验证范围
+
+C 单元测试遍历 256 个 opcode、多种 TX/RX 长度、16 MiB 边界和频率钳制。
+协议测试用 SPI/GPIO spy 编译实际 main.c，验证锁定、BOOT 释放/长按、输出使能、
+非法 opcode 无 SPI 调用、超长帧排空、截断帧、最大读取、正常释放和初始化失败。
+Python 测试验证两份完整文件、最后一字节差异、截断、全 00/FF、缺失文件及基准不匹配。
+这些测试不替代逻辑分析仪测频和实物供电验证。

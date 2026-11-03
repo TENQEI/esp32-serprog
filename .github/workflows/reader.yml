@@ -11,6 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: cc -std=c11 -Wall -Wextra -Werror tests/test_policy.c -o /tmp/test-policy && /tmp/test-policy
+      - run: python3 tests/run_protocol_test.py
       - run: python3 -m unittest discover -s tests -v
       - run: bash -n scripts/build_macos.sh scripts/flash_macos.sh
   firmware:
